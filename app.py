@@ -6,6 +6,19 @@ import re
 from scipy import stats
 from io import BytesIO
 
+from itertools import count
+
+_PLOT_COUNTER = count(1)
+
+def plot(fig, key=None):
+    """
+    Wrapper para evitar StreamlitDuplicateElementId en apps con muchos Plotly charts.
+    Si no se pasa key, genera uno automático único.
+    """
+    if key is None:
+        key = f"plot_{next(_PLOT_COUNTER)}"
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
 try:
     import statsmodels.formula.api as smf
     import statsmodels.api as sm
@@ -483,7 +496,7 @@ with tab2:
     st.dataframe(by_grado, use_container_width=True)
 
     fig = px.line(by_grado, x="Grado", y="media", markers=True, title="Accuracy promedio por Grado")
-    st.plotly_chart(fig, use_container_width=True)
+    plot(fig)
 
     fig_box = px.box(students.sort_values("grado_num"), x="grado", y="accuracy",
                      title="Distribución de accuracy por Grado")
@@ -520,7 +533,7 @@ with tab3:
 
     fig = px.bar(prueba_item, x="Prueba", y="accuracy_item", title="Accuracy por ítem según Prueba")
     fig.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig, use_container_width=True)
+    plot(fig)
 
 
 # =====================================================
@@ -548,7 +561,7 @@ with tab4:
     fig = px.bar(by_grado_gen, x="grado", y="media", color="genero", barmode="group",
                  title="Accuracy por Grado y Género (nivel estudiante)")
     fig.update_layout(xaxis_title="Grado")
-    st.plotly_chart(fig, use_container_width=True)
+    plot(fig)
 
     st.subheader("Género dentro de prueba (nivel ítem)")
     by_prueba_gen = (
@@ -559,7 +572,7 @@ with tab4:
     fig = px.bar(by_prueba_gen, x="Prueba", y="accuracy_item", color="Genero", barmode="group",
                  title="Accuracy por ítem: Prueba y Género")
     fig.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig, use_container_width=True)
+    plot(fig)
 
     if show_inference:
         st.subheader("Inferencia: diferencia global por género (Welch)")
@@ -600,7 +613,7 @@ with tab5:
             barmode="group",
             title="Accuracy por ítem: Grado × Competencia"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        plot(fig)
 
         pivot = comp_grado.pivot(index="Competencia", columns="Grado", values="accuracy_item")
         fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Grado")
@@ -618,7 +631,7 @@ with tab5:
             title="Accuracy por ítem: Prueba × Competencia"
         )
         fig.update_layout(xaxis_tickangle=-45)
-        st.plotly_chart(fig, use_container_width=True)
+        plot(fig)
 
         pivot = comp_prueba.pivot(index="Competencia", columns="Prueba", values="accuracy_item")
         fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Prueba")
@@ -660,7 +673,7 @@ with tab6:
                 hover_data=["Competencia", "n_items", "Muestra"],
                 title="Mapa de alertas: Grado × Competencia"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            plot(fig)
 
         elif vista_a == "Prueba × Competencia":
             st.dataframe(alerts_prueba.sort_values(["Semaforo", "accuracy_item"]), use_container_width=True)
@@ -675,7 +688,7 @@ with tab6:
                 title="Mapa de alertas: Prueba × Competencia"
             )
             fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
+            plot(fig)
 
         else:
             st.dataframe(
@@ -696,7 +709,7 @@ with tab6:
                 title="Mapa de alertas combinado: Grado × Prueba × Competencia"
             )
             fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
+            plot(fig)
 
         st.caption(
             f"Umbrales sugeridos: 🔴 < 0.55, 🟡 0.55–0.65, 🟢 ≥ 0.65. "
@@ -750,7 +763,7 @@ Criterios aplicados sobre **Grado × Prueba × Competencia**:
             color="Prueba",
             title="Top 10 brechas por género en focos rojos (vista combinada)"
         )
-        st.plotly_chart(fig, use_container_width=True)
+        plot(fig)
 
 
 # -----------------------------------------------------
@@ -793,3 +806,4 @@ if show_models:
             st.dataframe(out, use_container_width=True)
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
+
