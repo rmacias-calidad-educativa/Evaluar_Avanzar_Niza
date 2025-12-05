@@ -90,6 +90,19 @@ def semaforo_accuracy(acc):
         return "Verde"
 
 
+def normalize_semaforo_label(x):
+    if pd.isna(x):
+        return "Sin dato"
+    s = str(x).strip().lower()
+    if "rojo" in s:
+        return "Rojo"
+    if "amar" in s:
+        return "Amarillo"
+    if "verd" in s:
+        return "Verde"
+    return "Sin dato"
+
+
 def cohen_d(x, y):
     x = pd.Series(x).dropna()
     y = pd.Series(y).dropna()
@@ -113,7 +126,6 @@ def cohen_d(x, y):
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=0)
 
-    # Columnas mínimas para tablero institucional
     expected = [
         "OrgDefinedId", "Genero", "Grado",
         "Antigüedad Innova",
@@ -130,7 +142,7 @@ def load_data(path: str) -> pd.DataFrame:
     df["Grado"] = df["Grado"].apply(normalize_grado)
     df["grado_num"] = df["Grado"].map(GRADO_MAP)
 
-    # Prueba: usar columna si ya existe en el Excel actualizado
+    # Prueba: usar columna si ya viene en Excel actualizado; si no, derivar
     if "Prueba" not in df.columns:
         if "QuizName" not in df.columns:
             raise ValueError("El archivo no trae 'Prueba' ni 'QuizName'.")
@@ -145,11 +157,14 @@ def load_data(path: str) -> pd.DataFrame:
     if "EdadEst" in df.columns:
         df = df.drop(columns=["EdadEst"])
 
-    # Curso puede existir, pero no se usa
     return df
 
 
 def make_student_agg(df_items: pd.DataFrame) -> pd.DataFrame:
+    """
+    Agregado interno a nivel estudiante.
+    No se muestra OrgDefinedId en UI.
+    """
     g = df_items.groupby("OrgDefinedId", as_index=False).agg(
         items=("IsCorrect", "size"),
         correct=("IsCorrect", "sum"),
@@ -246,7 +261,7 @@ with st.sidebar:
     st.multiselect("Antigüedad estudiante (años)", options=antig_est_opts, key="antig_est_sel")
     st.multiselect("Antigüedad mentor (años)", options=antig_mentor_opts, key="antig_mentor_sel")
 
-    # ---- Scope base por intersección de filtros (sin competencia aún) ----
+    # ---- Scope base por intersección (sin competencia aún) ----
     df_scope = df.copy()
 
     gs = st.session_state.get("grados_sel", [])
@@ -351,7 +366,7 @@ c7.metric("Accuracy estudiante (mediana)", f"{k['Accuracy estudiante (mediana)']
 
 
 # -----------------------------------------------------
-# Tablas de competencias (3 niveles)
+# Competencias (3 niveles)
 # -----------------------------------------------------
 comp_grado = (
     df_f.groupby(["Grado", "grado_num", "Competencia"], as_index=False)["IsCorrect"]
@@ -373,20 +388,22 @@ comp_grado_prueba = (
 
 
 # -----------------------------------------------------
-# Alertas (3 niveles)
+# Alertas (3 niveles) - FIX COLORES
 # -----------------------------------------------------
-def build_alerts(df_comp):
+def build_alerts(df_comp, min_items):
     al = df_comp.copy()
-    al["Semaforo"] = al["accuracy_item"].apply(semaforo_accuracy)
-    al["Muestra"] = np.where(al["n_items"] < min_items_alert, "Baja", "Adecuada")
+    al["Semaforo"] = al["accuracy_item"].apply(semaforo_accuracy).apply(normalize_semaforo_label)
+    al["Muestra"] = np.where(al["n_items"] < min_items, "Baja", "Adecuada")
+
     emoji_map = {"Rojo": "🔴", "Amarillo": "🟡", "Verde": "🟢", "Sin dato": "⚪"}
     al["Alerta"] = al["Semaforo"].map(emoji_map)
+
     al["Semaforo"] = pd.Categorical(al["Semaforo"], categories=SEMAFORO_ORDER, ordered=True)
     return al
 
-alerts_grado = build_alerts(comp_grado)
-alerts_prueba = build_alerts(comp_prueba)
-alerts_grado_prueba = build_alerts(comp_grado_prueba)
+alerts_grado = build_alerts(comp_grado, min_items_alert)
+alerts_prueba = build_alerts(comp_prueba, min_items_alert)
+alerts_grado_prueba = build_alerts(comp_grado_prueba, min_items_alert)
 
 
 # -----------------------------------------------------
@@ -429,61 +446,93 @@ alerts_gp_gap = alerts_grado_prueba.merge(
     on=["Grado", "Prueba", "Competencia"],
     how="left"
 )
-
-if "Semaforo" in alerts_gp_gap.columns:
-    alerts_gp_gap["Semaforo"] = pd.Categorical(alerts_gp_gap["Semaforo"], categories=SEMAFORO_ORDER, ordered=True)
+alerts_gp_gap["Semaforo"] = pd.Categorical(alerts_gp_gap["Semaforo"], categories=SEMAFORO_ORDER, ordered=True)
 
 
 # -----------------------------------------------------
-# Antigüedades (agregados)
+# Antigüedades - análisis robusto (agregado)
 # -----------------------------------------------------
+students_ant = students.copy()
+
 by_ant_est = (
-    students.dropna(subset=["antig_est"])
+    students_ant.dropna(subset=["antig_est"])
     .groupby("antig_est", as_index=False)["accuracy"]
     .agg(n="count", media="mean", mediana="median", desv="std")
     .sort_values("antig_est")
 )
 
 by_ant_mentor = (
-    students.dropna(subset=["antig_mentor"])
+    students_ant.dropna(subset=["antig_mentor"])
     .groupby("antig_mentor", as_index=False)["accuracy"]
     .agg(n="count", media="mean", mediana="median", desv="std")
     .sort_values("antig_mentor")
 )
 
-item_ant_est = (
-    df_f.dropna(subset=["Antigüedad Innova"])
-    .groupby("Antigüedad Innova", as_index=False)["IsCorrect"]
-    .agg(n_items="size", accuracy_item="mean")
-    .sort_values("Antigüedad Innova")
+ant_pair = students_ant.dropna(subset=["antig_est", "antig_mentor"]).copy()
+
+# Grid conjunto de desempeño
+ant_joint = (
+    ant_pair.groupby(["antig_est", "antig_mentor"], as_index=False)["accuracy"]
+    .agg(n="count", media="mean", mediana="median")
+    .sort_values(["antig_est", "antig_mentor"])
 )
 
-item_ant_mentor = (
-    df_f.dropna(subset=["Antigüedad Mentor"])
-    .groupby("Antigüedad Mentor", as_index=False)["IsCorrect"]
-    .agg(n_items="size", accuracy_item="mean")
-    .sort_values("Antigüedad Mentor")
-)
+ant_joint_pivot_media = ant_joint.pivot(index="antig_est", columns="antig_mentor", values="media")
+ant_joint_pivot_n = ant_joint.pivot(index="antig_est", columns="antig_mentor", values="n")
+
+# Correlación entre antigüedades (relación)
+corr_rows = []
+if len(ant_pair) >= 5:
+    try:
+        r_p, p_p = stats.pearsonr(ant_pair["antig_est"], ant_pair["antig_mentor"])
+        corr_rows.append({"tipo": "Pearson", "r": r_p, "p_value": p_p})
+    except Exception:
+        pass
+    try:
+        r_s, p_s = stats.spearmanr(ant_pair["antig_est"], ant_pair["antig_mentor"])
+        corr_rows.append({"tipo": "Spearman", "r": r_s, "p_value": p_s})
+    except Exception:
+        pass
+ant_corr = pd.DataFrame(corr_rows)
+
+# Modelo con interacción (asociativo) - nivel estudiante
+ant_model_table = pd.DataFrame()
+if STATS_MODELS_OK:
+    try:
+        df_m = students_ant.dropna(subset=["accuracy", "antig_est", "antig_mentor", "grado", "genero"]).copy()
+        if len(df_m) >= 30:
+            m = smf.ols("accuracy ~ antig_est * antig_mentor + C(grado) + C(genero)", data=df_m).fit()
+            ant_model_table = pd.DataFrame({
+                "term": m.params.index,
+                "coef": m.params.values,
+                "p_value": m.pvalues.values
+            }).sort_values("p_value")
+    except Exception:
+        ant_model_table = pd.DataFrame()
 
 
 # -----------------------------------------------------
-# Exportación Excel
+# Exportación Excel (agregados + antigüedades)
 # -----------------------------------------------------
 tables_to_export = {
     "Grado_Competencia": comp_grado,
     "Prueba_Competencia": comp_prueba,
-    "Grado_Prueba_Competencia": comp_grado_prueba,
+    "Grado_Prueba_Compet": comp_grado_prueba,
     "Alertas_Grado": alerts_grado,
     "Alertas_Prueba": alerts_prueba,
-    "Alertas_Grado_Prueba": alerts_gp_gap,
-    "Antig_Estudiante": by_ant_est,
-    "Antig_Docente": by_ant_mentor,
+    "Alertas_Grado_Prueb": alerts_gp_gap,
+    "Antig_Est_Univari": by_ant_est,
+    "Antig_Doc_Univari": by_ant_mentor,
+    "Antig_Relacion": ant_corr,
+    "Antig_Interac_Grid": ant_joint,
+    "Antig_Modelo_Int": ant_model_table,
     "Resumen_Estudiantes": (
         students.groupby(["grado", "genero"], as_index=False)["accuracy"]
         .agg(n="count", media="mean", mediana="median", desv="std")
         .sort_values("media", ascending=False)
     )
 }
+
 excel_bytes = build_export_excel(tables_to_export)
 
 st.download_button(
@@ -690,10 +739,7 @@ with tab5:
 
     else:
         st.dataframe(comp_grado_prueba, use_container_width=True)
-        st.caption(
-            "Vista combinada para observar variaciones finas por grado dentro de una prueba "
-            "y competencia específica."
-        )
+        st.caption("Vista combinada para análisis finos institucionales.")
 
 
 # =====================================================
@@ -782,11 +828,11 @@ with tab7:
 
     st.markdown(
         f"""
-Criterios aplicados sobre **Grado × Prueba × Competencia**:
+Criterios sobre **Grado × Prueba × Competencia**:
 - **Semáforo = Rojo**
 - **Muestra = Adecuada** (n_items ≥ {min_items_alert})
 - **Brecha absoluta por género ≥ {gap_threshold:.2f}**
-- Priorización por **mayor brecha** y **menor accuracy**.
+- Prioridad por **mayor brecha** y **menor accuracy**.
         """
     )
 
@@ -824,11 +870,10 @@ Criterios aplicados sobre **Grado × Prueba × Competencia**:
 
 
 # =====================================================
-# TAB 8 - Antigüedades
+# TAB 8 - Antigüedades (relación + interacción)
 # =====================================================
 with tab8:
     st.subheader("Antigüedad del estudiante (Innova)")
-
     if by_ant_est.empty:
         st.info("No hay datos suficientes de antigüedad del estudiante con los filtros actuales.")
     else:
@@ -836,18 +881,11 @@ with tab8:
 
         fig = px.line(
             by_ant_est, x="antig_est", y="media", markers=True,
-            title="Accuracy promedio (estudiante) por antigüedad en Innova"
+            title="Accuracy promedio por antigüedad del estudiante"
         )
-        plot(fig, key="line_antig_est_students")
-
-        fig = px.bar(
-            item_ant_est, x="Antigüedad Innova", y="accuracy_item",
-            title="Accuracy por ítem según antigüedad del estudiante"
-        )
-        plot(fig, key="bar_antig_est_items")
+        plot(fig, key="line_antig_est")
 
     st.subheader("Antigüedad del docente/mentor (sin nombres)")
-
     if by_ant_mentor.empty:
         st.info("No hay datos suficientes de antigüedad del docente con los filtros actuales.")
     else:
@@ -855,31 +893,66 @@ with tab8:
 
         fig = px.line(
             by_ant_mentor, x="antig_mentor", y="media", markers=True,
-            title="Accuracy promedio (estudiante) por antigüedad del docente"
+            title="Accuracy promedio por antigüedad del docente"
         )
-        plot(fig, key="line_antig_mentor_students")
+        plot(fig, key="line_antig_mentor")
 
-        fig = px.bar(
-            item_ant_mentor, x="Antigüedad Mentor", y="accuracy_item",
-            title="Accuracy por ítem según antigüedad del docente"
-        )
-        plot(fig, key="bar_antig_mentor_items")
+    st.divider()
+    st.subheader("Relación entre antigüedades (estudiante vs docente)")
+
+    if ant_corr.empty:
+        st.caption("No hay suficientes datos para correlaciones con los filtros actuales.")
+    else:
+        st.dataframe(ant_corr, use_container_width=True)
+
+    st.divider()
+    st.subheader("Interacción en desempeño (agregado): antig_est × antig_mentor")
+
+    if ant_joint.empty:
+        st.info("No hay suficientes casos cruzados para construir el análisis conjunto.")
+    else:
+        st.dataframe(ant_joint, use_container_width=True)
+
+        # Heatmap de medias
+        try:
+            fig = px.imshow(
+                ant_joint_pivot_media,
+                aspect="auto",
+                title="Heatmap de desempeño medio: antigüedad estudiante × docente"
+            )
+            plot(fig, key="heat_ant_media")
+        except Exception:
+            st.caption("No fue posible renderizar el heatmap de medias con los filtros actuales.")
+
+        # Heatmap de tamaño muestral
+        try:
+            fig = px.imshow(
+                ant_joint_pivot_n,
+                aspect="auto",
+                title="Heatmap de tamaño muestral (n): antigüedad estudiante × docente"
+            )
+            plot(fig, key="heat_ant_n")
+        except Exception:
+            st.caption("No fue posible renderizar el heatmap de n con los filtros actuales.")
 
     if show_inference:
-        st.subheader("Inferencia rápida (tendencias agregadas)")
-        try:
-            if len(by_ant_est) >= 3:
-                r, p = stats.pearsonr(by_ant_est["antig_est"], by_ant_est["media"])
-                st.info(f"Correlación agregada antigüedad estudiante vs desempeño: r={r:.3f}, p={p:.3e}")
-            if len(by_ant_mentor) >= 3:
-                r, p = stats.pearsonr(by_ant_mentor["antig_mentor"], by_ant_mentor["media"])
-                st.info(f"Correlación agregada antigüedad docente vs desempeño: r={r:.3f}, p={p:.3e}")
-        except Exception as e:
-            st.warning(f"No fue posible calcular correlaciones agregadas: {e}")
+        st.divider()
+        st.subheader("Modelo asociativo con interacción (nivel estudiante)")
+
+        if not STATS_MODELS_OK:
+            st.info("statsmodels no disponible. Si lo necesitas, agrega 'statsmodels' al requirements.")
+        elif ant_model_table.empty:
+            st.info("Modelo no disponible por tamaño muestral o filtros actuales.")
+        else:
+            st.dataframe(ant_model_table, use_container_width=True)
+            st.caption(
+                "Modelo exploratorio institucional. Interpretación asociativa, no causal. "
+                "Incluye interacción antig_est × antig_mentor y controles por grado y género."
+            )
 
 
 # -----------------------------------------------------
-# Modelo logit simple opcional
+# Modelo logit simple opcional (ítem)
 # -----------------------------------------------------
 if show_models:
     st.divider()
