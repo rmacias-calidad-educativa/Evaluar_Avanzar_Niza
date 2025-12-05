@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from scipy import stats
+import re
 
 try:
     import statsmodels.formula.api as smf
@@ -45,6 +46,24 @@ def normalize_grado(s):
     s = s.replace("Décimo", "Decimo")
     return s
 
+def make_prueba(name: str) -> str:
+    """
+    Deriva 'Prueba' desde QuizName quitando el número final y el símbolo ° si existe.
+    Ej:
+      'Inglés 10°' -> 'Inglés'
+      'Lenguaje 8' -> 'Lenguaje'
+      'Sociales y Ciudadanas 10°' -> 'Sociales y Ciudadanas'
+    """
+    if pd.isna(name):
+        return name
+    s = str(name).strip()
+
+    # Quitar patrón típico final con grado
+    s = re.sub(r"\s+\d+\s*°\s*$", "", s)   # ' 10°'
+    s = re.sub(r"\s+\d+\s*$", "", s)       # ' 10'
+
+    return s.strip()
+
 def cohen_d(x, y):
     x = pd.Series(x).dropna()
     y = pd.Series(y).dropna()
@@ -56,12 +75,6 @@ def cohen_d(x, y):
     if pooled == 0 or np.isnan(pooled):
         return np.nan
     return (x.mean() - y.mean()) / pooled
-
-def eta_squared_from_anova(ss_between, ss_resid):
-    denom = ss_between + ss_resid
-    if denom == 0:
-        return np.nan
-    return ss_between / denom
 
 def semaforo_accuracy(acc):
     if pd.isna(acc):
@@ -96,18 +109,19 @@ def load_data(path: str) -> pd.DataFrame:
     df["Grado"] = df["Grado"].apply(normalize_grado)
     df["grado_num"] = df["Grado"].map(GRADO_MAP)
 
+    # Crear Prueba derivada del QuizName
+    df["Prueba"] = df["QuizName"].apply(make_prueba)
+
     df["IsCorrect"] = pd.to_numeric(df["IsCorrect"], errors="coerce").fillna(0).astype(int).clip(0, 1)
     df["Antigüedad Innova"] = pd.to_numeric(df["Antigüedad Innova"], errors="coerce")
     df["Antigüedad Mentor"] = pd.to_numeric(df["Antigüedad Mentor"], errors="coerce")
     df["Competencia"] = df["Competencia"].fillna("Sin dato")
 
-    # Excluir explícitamente EdadEst y Curso del flujo analítico
+    # Excluir explícitamente EdadEst
     if "EdadEst" in df.columns:
         df = df.drop(columns=["EdadEst"])
 
-    # Curso existe pero NO se usará en análisis institucional
-    # NombreMentor tampoco se mostrará en UI.
-
+    # Curso se deja pero NO se usa en el tablero por instrucción.
     return df
 
 
@@ -129,7 +143,7 @@ def kpis(df_items, df_students):
     return {
         "Estudiantes": int(df_students["OrgDefinedId"].nunique()),
         "Ítems": int(len(df_items)),
-        "Quices": int(df_items["QuizName"].nunique()),
+        "Pruebas": int(df_items["Prueba"].nunique()),
         "Competencias": int(df_items["Competencia"].nunique()),
         "Accuracy ítem": float(df_items["IsCorrect"].mean()),
         "Accuracy estudiante (media)": float(df_students["accuracy"].mean()),
@@ -141,27 +155,42 @@ def kpis(df_items, df_students):
 # UI principal
 # -----------------------------------------------------
 st.title("Evaluar para Avanzar de Niza - Tablero Institucional")
-st.caption("Análisis agregados por grado, género, competencias, quices y antigüedades. Sin EdadEst ni Curso. Sin PII.")
+st.caption("Segmentación obligatoria por Grado o por Prueba. Competencias y alertas se calculan solo con esa elección. Sin EdadEst ni Curso. Sin PII.")
+
 
 with st.sidebar:
-    st.header("Fuente y filtros")
+    st.header("Fuente y segmentación")
 
     excel_path = "DatAvanzar.xlsx"
-
     try:
         df = load_data(excel_path)
     except Exception as e:
         st.error(f"No se pudo cargar el archivo: {e}")
         st.stop()
 
-    grados = [g for g in GRADO_ORDER if g in df["Grado"].dropna().unique().tolist()]
-    grados_sel = st.multiselect("Grado", options=grados, default=grados)
+    # --------- Segmentación obligatoria ----------
+    modo = st.radio(
+        "Segmentación principal (obligatoria)",
+        ["Grado", "Prueba"],
+        index=0
+    )
 
+    st.divider()
+    st.subheader("Filtros")
+
+    # Filtros de segmentación (mutuamente excluyentes)
+    if modo == "Grado":
+        grados = [g for g in GRADO_ORDER if g in df["Grado"].dropna().unique().tolist()]
+        grados_sel = st.multiselect("Grado", options=grados, default=grados)
+        pruebas_sel = None
+    else:
+        pruebas = sorted(df["Prueba"].dropna().unique().tolist())
+        pruebas_sel = st.multiselect("Prueba", options=pruebas, default=pruebas)
+        grados_sel = None
+
+    # Filtros secundarios (sí aplican en ambos modos)
     generos = sorted(df["Genero"].dropna().unique().tolist())
     generos_sel = st.multiselect("Género", options=generos, default=generos)
-
-    quizzes = sorted(df["QuizName"].dropna().unique().tolist())
-    quiz_sel = st.multiselect("Quiz", options=quizzes, default=quizzes)
 
     comps = sorted(df["Competencia"].dropna().unique().tolist())
     comp_sel = st.multiselect("Competencia", options=comps, default=comps)
@@ -176,9 +205,8 @@ with st.sidebar:
     st.subheader("Opciones")
 
     show_inference = st.checkbox("Mostrar inferenciales", value=True)
-    show_effects = st.checkbox("Mostrar brechas estandarizadas", value=True)
+    show_models = st.checkbox("Mostrar logit simple", value=False)
     show_alerts = st.checkbox("Mostrar alertas semáforo", value=True)
-    show_models = st.checkbox("Mostrar modelos logit", value=True)
 
 
 # -----------------------------------------------------
@@ -186,16 +214,21 @@ with st.sidebar:
 # -----------------------------------------------------
 df_f = df.copy()
 
-if grados_sel:
+if modo == "Grado" and grados_sel:
     df_f = df_f[df_f["Grado"].isin(grados_sel)]
+
+if modo == "Prueba" and pruebas_sel:
+    df_f = df_f[df_f["Prueba"].isin(pruebas_sel)]
+
 if generos_sel:
     df_f = df_f[df_f["Genero"].isin(generos_sel)]
-if quiz_sel:
-    df_f = df_f[df_f["QuizName"].isin(quiz_sel)]
+
 if comp_sel:
     df_f = df_f[df_f["Competencia"].isin(comp_sel)]
+
 if antig_est_sel:
     df_f = df_f[df_f["Antigüedad Innova"].isin(antig_est_sel)]
+
 if antig_mentor_sel:
     df_f = df_f[df_f["Antigüedad Mentor"].isin(antig_mentor_sel)]
 
@@ -203,8 +236,15 @@ if df_f.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
 
+
+# -----------------------------------------------------
+# Agregados base
+# -----------------------------------------------------
 students = make_student_agg(df_f)
 k = kpis(df_f, students)
+
+# Definir columna de segmentación para todo el tablero
+SEG_COL = "Grado" if modo == "Grado" else "Prueba"
 
 
 # -----------------------------------------------------
@@ -213,7 +253,7 @@ k = kpis(df_f, students)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Estudiantes (únicos)", k["Estudiantes"])
 c2.metric("Ítems analizados", k["Ítems"])
-c3.metric("Quices", k["Quices"])
+c3.metric("Pruebas (agrupadas)", k["Pruebas"])
 c4.metric("Competencias", k["Competencias"])
 
 c5, c6, c7 = st.columns(3)
@@ -225,79 +265,88 @@ c7.metric("Accuracy estudiante (mediana)", f"{k['Accuracy estudiante (mediana)']
 # -----------------------------------------------------
 # Tabs
 # -----------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "Resumen general",
-    "Grados",
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "Resumen",
+    "Segmentación principal",
     "Género",
-    "Competencias y Quices",
-    "Antigüedades",
-    "Brechas, modelos y alertas"
+    "Competencias",
+    "Alertas"
 ])
 
 
 # =====================================================
-# TAB 1
+# TAB 1 - Resumen
 # =====================================================
 with tab1:
     st.subheader("Distribución general del desempeño (nivel estudiante)")
     fig_hist = px.histogram(students, x="accuracy", nbins=30, title="Distribución de accuracy por estudiante")
     st.plotly_chart(fig_hist, use_container_width=True)
 
-    st.subheader("Quiz: desempeño por ítem")
-    quiz_item = (
-        df_f.groupby("QuizName", as_index=False)["IsCorrect"]
+    st.subheader("Desempeño agregado por Prueba (ítem)")
+
+    prueba_item = (
+        df_f.groupby("Prueba", as_index=False)["IsCorrect"]
         .agg(n_items="size", accuracy_item="mean")
         .sort_values("accuracy_item", ascending=False)
     )
+    st.dataframe(prueba_item, use_container_width=True)
 
-    colA, colB = st.columns(2)
-    with colA:
-        st.markdown("**Top 10 quices**")
-        st.dataframe(quiz_item.head(10), use_container_width=True)
-    with colB:
-        st.markdown("**Bottom 10 quices**")
-        st.dataframe(quiz_item.tail(10), use_container_width=True)
-
-    fig_quiz = px.bar(quiz_item, x="QuizName", y="accuracy_item", title="Accuracy por ítem según Quiz")
-    fig_quiz.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig_quiz, use_container_width=True)
+    fig_pr = px.bar(prueba_item, x="Prueba", y="accuracy_item", title="Accuracy por ítem según Prueba")
+    fig_pr.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig_pr, use_container_width=True)
 
 
 # =====================================================
-# TAB 2 - Grados
+# TAB 2 - Segmentación principal
 # =====================================================
 with tab2:
-    st.subheader("Desempeño por grado (nivel estudiante)")
+    st.subheader(f"Desempeño por {SEG_COL}")
 
-    by_grado = (
-        students.groupby(["grado", "grado_num"], as_index=False)["accuracy"]
-        .agg(n="count", media="mean", mediana="median", desv="std")
-        .sort_values("grado_num")
-    )
+    if modo == "Grado":
+        by_seg = (
+            students.groupby(["grado", "grado_num"], as_index=False)["accuracy"]
+            .agg(n="count", media="mean", mediana="median", desv="std")
+            .sort_values("grado_num")
+            .rename(columns={"grado": "Grado"})
+        )
 
-    st.dataframe(by_grado[["grado", "n", "media", "mediana", "desv"]], use_container_width=True)
+        st.dataframe(by_seg[["Grado", "n", "media", "mediana", "desv"]], use_container_width=True)
 
-    fig_g = px.line(by_grado, x="grado", y="media", markers=True, title="Accuracy promedio por grado")
-    st.plotly_chart(fig_g, use_container_width=True)
+        fig = px.line(by_seg, x="Grado", y="media", markers=True, title="Accuracy promedio por Grado")
+        st.plotly_chart(fig, use_container_width=True)
 
-    fig_box = px.box(students.sort_values("grado_num"), x="grado", y="accuracy", title="Distribución de accuracy por grado")
-    st.plotly_chart(fig_box, use_container_width=True)
+        fig_box = px.box(students.sort_values("grado_num"), x="grado", y="accuracy",
+                         title="Distribución de accuracy por Grado")
+        fig_box.update_layout(xaxis_title="Grado")
+        st.plotly_chart(fig_box, use_container_width=True)
 
-    if show_inference:
-        st.subheader("Inferencia: diferencias entre grados (ANOVA)")
-        try:
-            groups = [
-                students.loc[students["grado"] == g, "accuracy"].dropna()
-                for g in by_grado["grado"].tolist()
-            ]
-            valid_groups = [gr for gr in groups if len(gr) >= 5]
-            if len(valid_groups) >= 2:
-                f_stat, p_val = stats.f_oneway(*valid_groups)
-                st.info(f"ANOVA: F = {f_stat:.3f}, p = {p_val:.3e}.")
-            else:
-                st.warning("Muestras insuficientes por grado para ANOVA con estos filtros.")
-        except Exception as e:
-            st.warning(f"No fue posible calcular ANOVA: {e}")
+        if show_inference:
+            st.subheader("Inferencia: diferencias entre grados (ANOVA)")
+            try:
+                grados_presentes = by_seg["Grado"].tolist()
+                groups = [students.loc[students["grado"] == g, "accuracy"].dropna() for g in grados_presentes]
+                valid = [gr for gr in groups if len(gr) >= 5]
+                if len(valid) >= 2:
+                    f_stat, p_val = stats.f_oneway(*valid)
+                    st.info(f"ANOVA: F = {f_stat:.3f}, p = {p_val:.3e}.")
+                else:
+                    st.warning("Muestras insuficientes por grado para ANOVA.")
+            except Exception as e:
+                st.warning(f"No fue posible calcular ANOVA: {e}")
+
+    else:
+        # Por Prueba usamos nivel ítem (más estable que intentar "accuracy por prueba" por estudiante)
+        by_seg = (
+            df_f.groupby("Prueba", as_index=False)["IsCorrect"]
+            .agg(n_items="size", accuracy_item="mean")
+            .sort_values("accuracy_item", ascending=False)
+        )
+
+        st.dataframe(by_seg, use_container_width=True)
+
+        fig = px.bar(by_seg, x="Prueba", y="accuracy_item", title="Accuracy por ítem según Prueba")
+        fig.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # =====================================================
@@ -311,23 +360,34 @@ with tab3:
         .agg(n="count", media="mean", mediana="median", desv="std")
         .sort_values("media", ascending=False)
     )
-
     st.dataframe(by_gen, use_container_width=True)
 
     fig_gen = px.bar(by_gen, x="genero", y="media", title="Accuracy promedio por género")
     st.plotly_chart(fig_gen, use_container_width=True)
 
-    st.subheader("Género dentro de cada grado")
+    st.subheader(f"Género dentro de {SEG_COL}")
 
-    by_grado_gen = (
-        students.groupby(["grado", "grado_num", "genero"], as_index=False)["accuracy"]
-        .agg(n="count", media="mean")
-        .sort_values("grado_num")
-    )
-
-    fig_gg = px.bar(by_grado_gen, x="grado", y="media", color="genero", barmode="group",
-                    title="Accuracy por grado y género")
-    st.plotly_chart(fig_gg, use_container_width=True)
+    if modo == "Grado":
+        by_seg_gen = (
+            students.groupby(["grado", "grado_num", "genero"], as_index=False)["accuracy"]
+            .agg(n="count", media="mean")
+            .sort_values("grado_num")
+        )
+        fig = px.bar(by_seg_gen, x="grado", y="media", color="genero", barmode="group",
+                     title="Accuracy por Grado y Género")
+        fig.update_layout(xaxis_title="Grado")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        # Por Prueba usamos nivel ítem para el cruce con género
+        by_seg_gen = (
+            df_f.groupby(["Prueba", "Genero"], as_index=False)["IsCorrect"]
+            .agg(n_items="size", accuracy_item="mean")
+            .sort_values("accuracy_item", ascending=False)
+        )
+        fig = px.bar(by_seg_gen, x="Prueba", y="accuracy_item", color="Genero", barmode="group",
+                     title="Accuracy por ítem según Prueba y Género")
+        fig.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
     if show_inference:
         st.subheader("Inferencia: diferencia por género (Welch)")
@@ -337,7 +397,8 @@ with tab3:
             b = students.loc[students["genero"] == gens[1], "accuracy"].dropna()
             if len(a) >= 10 and len(b) >= 10:
                 t_stat, p_val = stats.ttest_ind(a, b, equal_var=False)
-                st.info(f"T-test: t = {t_stat:.3f}, p = {p_val:.3e}.")
+                d = cohen_d(a, b)
+                st.info(f"T-test: t = {t_stat:.3f}, p = {p_val:.3e}.  |  Cohen's d ≈ {d:.3f}")
             else:
                 st.warning("Muestras insuficientes por género para t-test.")
         else:
@@ -345,274 +406,118 @@ with tab3:
 
 
 # =====================================================
-# TAB 4 - Competencias y Quices
+# TAB 4 - Competencias (solo por Grado o por Prueba)
 # =====================================================
 with tab4:
-    st.subheader("Desempeño por competencia (nivel ítem)")
+    st.subheader(f"Competencias segmentadas por {SEG_COL}")
 
-    comp_item = (
-        df_f.groupby("Competencia", as_index=False)["IsCorrect"]
+    # Tabla central: SEG_COL × Competencia
+    comp_seg = (
+        df_f.groupby([SEG_COL, "Competencia"], as_index=False)["IsCorrect"]
         .agg(n_items="size", accuracy_item="mean")
-        .sort_values("accuracy_item", ascending=False)
+        .sort_values("accuracy_item")
     )
+    st.dataframe(comp_seg, use_container_width=True)
 
-    st.dataframe(comp_item, use_container_width=True)
-
-    fig_comp = px.bar(comp_item, x="Competencia", y="accuracy_item", title="Accuracy por ítem según competencia")
-    fig_comp.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig_comp, use_container_width=True)
-
-    st.subheader("Competencia por grado (ítem)")
-
-    comp_grado = (
-        df_f.groupby(["Grado", "grado_num", "Competencia"], as_index=False)["IsCorrect"]
-        .agg(n_items="size", accuracy_item="mean")
-        .sort_values("grado_num")
+    fig = px.bar(
+        comp_seg,
+        x=SEG_COL,
+        y="accuracy_item",
+        color="Competencia",
+        barmode="group",
+        title=f"Accuracy por ítem: {SEG_COL} × Competencia"
     )
+    if SEG_COL == "Prueba":
+        fig.update_layout(xaxis_tickangle=-45)
+    st.plotly_chart(fig, use_container_width=True)
 
-    fig_cg = px.line(comp_grado, x="Grado", y="accuracy_item", color="Competencia",
-                     title="Trayectorias por competencia a través de grados")
-    st.plotly_chart(fig_cg, use_container_width=True)
-
-    st.subheader("Heatmap: Competencia × Quiz (ítem)")
-
-    qc = (
-        df_f.groupby(["QuizName", "Competencia"], as_index=False)["IsCorrect"]
-        .mean().rename(columns={"IsCorrect": "accuracy_item"})
-    )
-    qc_p = qc.pivot(index="Competencia", columns="QuizName", values="accuracy_item")
-
-    fig_heat = px.imshow(qc_p, aspect="auto", title="Heatmap de accuracy por ítem")
-    st.plotly_chart(fig_heat, use_container_width=True)
+    # Heatmap SEG_COL × Competencia
+    pivot = comp_seg.pivot(index="Competencia", columns=SEG_COL, values="accuracy_item")
+    fig_h = px.imshow(pivot, aspect="auto", title=f"Heatmap: Competencia × {SEG_COL}")
+    st.plotly_chart(fig_h, use_container_width=True)
 
 
 # =====================================================
-# TAB 5 - Antigüedades
+# TAB 5 - Alertas (solo por Grado o por Prueba)
 # =====================================================
 with tab5:
-    st.subheader("Antigüedad del estudiante en Innova (nivel estudiante)")
+    st.subheader(f"Alertas institucionales por {SEG_COL} × Competencia")
 
-    by_ant_est = (
-        students.groupby("antig_est", as_index=False)["accuracy"]
-        .agg(n="count", media="mean", mediana="median", desv="std")
-        .sort_values("antig_est")
-    )
-    st.dataframe(by_ant_est, use_container_width=True)
-
-    fig_ae = px.line(by_ant_est, x="antig_est", y="media", markers=True,
-                     title="Accuracy promedio por antigüedad del estudiante")
-    st.plotly_chart(fig_ae, use_container_width=True)
-
-    st.subheader("Antigüedad del mentor (sin nombres)")
-
-    by_ant_m = (
-        students.groupby("antig_mentor", as_index=False)["accuracy"]
-        .agg(n="count", media="mean", mediana="median", desv="std")
-        .sort_values("antig_mentor")
-    )
-    st.dataframe(by_ant_m, use_container_width=True)
-
-    fig_am = px.line(by_ant_m, x="antig_mentor", y="media", markers=True,
-                     title="Accuracy promedio por antigüedad del mentor")
-    st.plotly_chart(fig_am, use_container_width=True)
-
-    st.caption("Interpretar patrones de mentoría controlando siempre por grado/competencia/quiz para evitar sesgos de asignación.")
-
-
-# =====================================================
-# TAB 6 - Brechas, modelos y alertas
-# =====================================================
-with tab6:
-    st.subheader("Brechas estandarizadas (efectos)")
-
-    if show_effects:
-        # Cohen's d global por género
-        gen_list = sorted(students["genero"].dropna().unique().tolist())
-        d_global = np.nan
-        d_table = []
-
-        if len(gen_list) == 2:
-            g1, g2 = gen_list[0], gen_list[1]
-            a = students.loc[students["genero"] == g1, "accuracy"]
-            b = students.loc[students["genero"] == g2, "accuracy"]
-            d_global = cohen_d(a, b)
-
-        st.markdown("**Cohen’s d global por género (nivel estudiante)**")
-        if np.isnan(d_global):
-            st.info("No se pudo calcular Cohen’s d global con los filtros actuales.")
-        else:
-            st.success(f"d ≈ {d_global:.3f} (magnitud esperada: pequeño ~0.2, mediano ~0.5, grande ~0.8).")
-
-        # Cohen's d por género dentro de cada grado
-        st.markdown("**Cohen’s d por grado**")
-        for g in sorted(students.dropna(subset=["grado_num"])["grado"].unique(), key=lambda x: GRADO_MAP.get(x, 999)):
-            sub = students[students["grado"] == g]
-            gens = sorted(sub["genero"].dropna().unique().tolist())
-            if len(gens) == 2:
-                d = cohen_d(sub.loc[sub["genero"] == gens[0], "accuracy"],
-                            sub.loc[sub["genero"] == gens[1], "accuracy"])
-                d_table.append({"Grado": g, "Género A": gens[0], "Género B": gens[1], "Cohen_d": d, "n": len(sub)})
-            else:
-                d_table.append({"Grado": g, "Género A": None, "Género B": None, "Cohen_d": np.nan, "n": len(sub)})
-
-        d_df = pd.DataFrame(d_table)
-        st.dataframe(d_df, use_container_width=True)
-
-        fig_d = px.bar(
-            d_df.dropna(subset=["Cohen_d"]),
-            x="Grado",
-            y="Cohen_d",
-            title="Brecha estandarizada por género dentro de cada grado"
-        )
-        st.plotly_chart(fig_d, use_container_width=True)
-
-        # ETA² de ANOVA por grado
-        if show_inference:
-            st.markdown("**Tamaño de efecto por grado (η² del ANOVA)**")
-            try:
-                # ANOVA con scipy no da SS directamente; aproximamos con modelo lineal si statsmodels está
-                if STATS_MODELS_OK:
-                    an = smf.ols("accuracy ~ C(grado)", data=students).fit()
-                    aov = sm.stats.anova_lm(an, typ=2)
-                    ss_between = float(aov.loc["C(grado)", "sum_sq"])
-                    ss_resid = float(aov.loc["Residual", "sum_sq"])
-                    eta2 = eta_squared_from_anova(ss_between, ss_resid)
-                    st.success(f"η² ≈ {eta2:.3f} (proporción de varianza explicada por el grado).")
-                else:
-                    st.info("Para η² automático, agrega 'statsmodels' al entorno.")
-            except Exception as e:
-                st.warning(f"No fue posible calcular η²: {e}")
+    if not show_alerts:
+        st.info("Alertas desactivadas.")
     else:
-        st.info("Brechas estandarizadas desactivadas en el sidebar.")
-
-
-    st.divider()
-    st.subheader("Modelos logit (nivel ítem)")
-
-    if show_models:
-        if not STATS_MODELS_OK:
-            st.warning("statsmodels no está disponible. Agrega 'statsmodels' al requirements.txt.")
-        else:
-            st.markdown(
-                """
-Modelos para probabilidad de acierto **sin EdadEst ni Curso**:
-
-- **Modelo 1 (simple):**  
-  `IsCorrect ~ grado_num + género + antig_est + antig_mentor`
-
-- **Modelo 2 (controlado):**  
-  añade efectos fijos de `Competencia` y `QuizName`.
-
-Ambos con errores robustos **cluster por estudiante**.
-                """
-            )
-
-            df_glm = df_f.dropna(subset=["grado_num", "Genero", "Antigüedad Innova", "Antigüedad Mentor"]).copy()
-            df_glm = df_glm.rename(columns={
-                "Genero": "genero",
-                "Antigüedad Innova": "antig_est",
-                "Antigüedad Mentor": "antig_mentor"
-            })
-
-            # --- Modelo 1
-            try:
-                glm1 = smf.glm(
-                    "IsCorrect ~ grado_num + C(genero) + antig_est + antig_mentor",
-                    data=df_glm,
-                    family=sm.families.Binomial()
-                ).fit(
-                    cov_type="cluster",
-                    cov_kwds={"groups": df_glm["OrgDefinedId"]}
-                )
-
-                params = glm1.params
-                bse = glm1.bse
-                pvals = glm1.pvalues
-
-                out1 = pd.DataFrame({
-                    "term": params.index,
-                    "coef_logit": params.values,
-                    "odds_ratio": np.exp(params.values),
-                    "p_value": pvals.values
-                })
-
-                st.markdown("**Modelo 1: Logit simple**")
-                st.dataframe(out1, use_container_width=True)
-            except Exception as e:
-                st.warning(f"No fue posible estimar Modelo 1: {e}")
-
-            # --- Modelo 2
-            try:
-                glm2 = smf.glm(
-                    "IsCorrect ~ grado_num + C(genero) + antig_est + antig_mentor + C(Competencia) + C(QuizName)",
-                    data=df_glm,
-                    family=sm.families.Binomial()
-                ).fit(
-                    cov_type="cluster",
-                    cov_kwds={"groups": df_glm["OrgDefinedId"]}
-                )
-
-                # Resumen limpio (solo términos institucionales)
-                keep = ["Intercept", "grado_num", "C(genero)[T.Masculino]", "antig_est", "antig_mentor"]
-                keep_existing = [k for k in keep if k in glm2.params.index]
-
-                params2 = glm2.params[keep_existing]
-                pvals2 = glm2.pvalues[keep_existing]
-
-                out2 = pd.DataFrame({
-                    "term": params2.index,
-                    "coef_logit": params2.values,
-                    "odds_ratio": np.exp(params2.values),
-                    "p_value": pvals2.values
-                })
-
-                st.markdown("**Modelo 2: Logit con controles de Competencia y Quiz**")
-                st.dataframe(out2, use_container_width=True)
-                st.caption("Este resumen oculta dummies para mantener lectura institucional.")
-            except Exception as e:
-                st.warning(f"No fue posible estimar Modelo 2: {e}")
-    else:
-        st.info("Modelos desactivados en el sidebar.")
-
-
-    st.divider()
-    st.subheader("Alertas institucionales (semáforo) por Grado × Competencia")
-
-    if show_alerts:
-        gc = (
-            df_f.groupby(["Grado", "grado_num", "Competencia"], as_index=False)["IsCorrect"]
+        al = (
+            df_f.groupby([SEG_COL, "Competencia"], as_index=False)["IsCorrect"]
             .agg(n_items="size", accuracy_item="mean")
-            .sort_values(["grado_num", "accuracy_item"])
+        )
+        al["Semaforo"] = al["accuracy_item"].apply(semaforo_accuracy)
+        al["Muestra"] = np.where(al["n_items"] < 50, "Baja", "Adecuada")
+
+        emoji_map = {"Rojo": "🔴", "Amarillo": "🟡", "Verde": "🟢", "Sin dato": "⚪"}
+        al["Alerta"] = al["Semaforo"].map(emoji_map)
+
+        st.dataframe(
+            al[[SEG_COL, "Competencia", "n_items", "accuracy_item", "Alerta", "Muestra"]]
+            .sort_values(["Semaforo", "accuracy_item"]),
+            use_container_width=True
         )
 
-        gc["Semaforo"] = gc["accuracy_item"].apply(semaforo_accuracy)
-
-        # Regla de muestra baja
-        gc["Muestra"] = np.where(gc["n_items"] < 50, "Baja", "Adecuada")
-
-        # Emoji para lectura rápida
-        emoji_map = {"Rojo": "🔴", "Amarillo": "🟡", "Verde": "🟢", "Sin dato": "⚪"}
-        gc["Alerta"] = gc["Semaforo"].map(emoji_map)
-
-        # Tabla institucional
-        show_cols = ["Grado", "Competencia", "n_items", "accuracy_item", "Alerta", "Muestra"]
-        st.dataframe(gc[show_cols], use_container_width=True)
-
-        # Gráfico: semáforo vs accuracy
-        fig_gc = px.scatter(
-            gc,
-            x="Grado",
+        fig = px.scatter(
+            al,
+            x=SEG_COL,
             y="accuracy_item",
             color="Semaforo",
             size="n_items",
             hover_data=["Competencia", "n_items", "Muestra"],
-            title="Mapa de alertas por competencia dentro de cada grado"
+            title=f"Mapa de alertas: {SEG_COL} × Competencia"
         )
-        st.plotly_chart(fig_gc, use_container_width=True)
+        if SEG_COL == "Prueba":
+            fig.update_layout(xaxis_tickangle=-45)
+        st.plotly_chart(fig, use_container_width=True)
 
         st.caption(
-            "Umbrales institucionales sugeridos: Rojo < 0.55, Amarillo 0.55–0.65, Verde ≥ 0.65. "
-            "Puedes ajustar estos cortes según metas internas."
+            "Umbrales sugeridos: 🔴 < 0.55, 🟡 0.55–0.65, 🟢 ≥ 0.65. "
+            "Etiqueta de muestra baja para evitar decisiones con evidencia frágil."
         )
+
+
+# -----------------------------------------------------
+# Modelo logit simple opcional (sin EdadEst ni Curso)
+# -----------------------------------------------------
+if show_models:
+    st.divider()
+    st.header("Modelo logit simple (ítem) - opcional")
+
+    if not STATS_MODELS_OK:
+        st.warning("statsmodels no está disponible. Agrega 'statsmodels' al requirements.txt.")
     else:
-        st.info("Alertas desactivadas en el sidebar.")
+        df_glm = df_f.dropna(subset=["grado_num", "Genero", "Antigüedad Innova", "Antigüedad Mentor"]).copy()
+        df_glm = df_glm.rename(columns={
+            "Genero": "genero",
+            "Antigüedad Innova": "antig_est",
+            "Antigüedad Mentor": "antig_mentor"
+        })
+
+        try:
+            glm = smf.glm(
+                "IsCorrect ~ grado_num + C(genero) + antig_est + antig_mentor",
+                data=df_glm,
+                family=sm.families.Binomial()
+            ).fit(
+                cov_type="cluster",
+                cov_kwds={"groups": df_glm["OrgDefinedId"]}
+            )
+
+            params = glm.params
+            pvals = glm.pvalues
+
+            out = pd.DataFrame({
+                "term": params.index,
+                "coef_logit": params.values,
+                "odds_ratio": np.exp(params.values),
+                "p_value": pvals.values
+            })
+
+            st.dataframe(out, use_container_width=True)
+        except Exception as e:
+            st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
