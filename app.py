@@ -5,19 +5,7 @@ import plotly.express as px
 import re
 from scipy import stats
 from io import BytesIO
-
 from itertools import count
-
-_PLOT_COUNTER = count(1)
-
-def plot(fig, key=None):
-    """
-    Wrapper para evitar StreamlitDuplicateElementId en apps con muchos Plotly charts.
-    Si no se pasa key, genera uno automático único.
-    """
-    if key is None:
-        key = f"plot_{next(_PLOT_COUNTER)}"
-    st.plotly_chart(fig, use_container_width=True, key=key)
 
 try:
     import statsmodels.formula.api as smf
@@ -31,6 +19,17 @@ except Exception:
 # Configuración
 # -----------------------------------------------------
 st.set_page_config(page_title="Evaluar para Avanzar - Niza", layout="wide")
+
+
+# -----------------------------------------------------
+# Plot wrapper (anti DuplicateElementId)
+# -----------------------------------------------------
+_PLOT_COUNTER = count(1)
+
+def plot(fig, key=None):
+    if key is None:
+        key = f"plot_{next(_PLOT_COUNTER)}"
+    st.plotly_chart(fig, use_container_width=True, key=key)
 
 
 # -----------------------------------------------------
@@ -51,6 +50,14 @@ GRADO_MAP = {
     "Once": 11
 }
 GRADO_ORDER = ["Tercero", "Cuarto", "Quinto", "Sexto", "Séptimo", "Octavo", "Noveno", "Decimo", "Undecimo"]
+
+SEMAFORO_COLOR_MAP = {
+    "Rojo": "#d62728",
+    "Amarillo": "#ffbf00",
+    "Verde": "#2ca02c",
+    "Sin dato": "#7f7f7f"
+}
+SEMAFORO_ORDER = ["Rojo", "Amarillo", "Verde", "Sin dato"]
 
 
 def normalize_grado(s):
@@ -106,6 +113,7 @@ def cohen_d(x, y):
 def load_data(path: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=0)
 
+    # Columnas mínimas para tablero institucional
     expected = [
         "OrgDefinedId", "Genero", "Grado",
         "Antigüedad Innova",
@@ -122,7 +130,7 @@ def load_data(path: str) -> pd.DataFrame:
     df["Grado"] = df["Grado"].apply(normalize_grado)
     df["grado_num"] = df["Grado"].map(GRADO_MAP)
 
-    # Prueba: usar columna del archivo si existe; si no, derivar
+    # Prueba: usar columna si ya existe en el Excel actualizado
     if "Prueba" not in df.columns:
         if "QuizName" not in df.columns:
             raise ValueError("El archivo no trae 'Prueba' ni 'QuizName'.")
@@ -133,10 +141,11 @@ def load_data(path: str) -> pd.DataFrame:
     df["Antigüedad Mentor"] = pd.to_numeric(df["Antigüedad Mentor"], errors="coerce")
     df["Competencia"] = df["Competencia"].fillna("Sin dato")
 
-    # Exclusión explícita
+    # Exclusión explícita por instrucción
     if "EdadEst" in df.columns:
         df = df.drop(columns=["EdadEst"])
 
+    # Curso puede existir, pero no se usa
     return df
 
 
@@ -204,11 +213,15 @@ st.title("Evaluar para Avanzar de Niza - Tablero Institucional")
 st.caption(
     "Filtros simultáneos por **Grado** y **Prueba**. "
     "El filtro de **Competencia** solo muestra competencias realmente asociadas "
-    "a la selección de grados y pruebas. Sin EdadEst ni Curso. Solo agregados."
+    "a la selección. Sin EdadEst ni Curso. Solo agregados."
 )
 
 excel_path = "DatAvanzar.xlsx"
-df = load_data(excel_path)
+try:
+    df = load_data(excel_path)
+except Exception as e:
+    st.error(f"No se pudo cargar el archivo: {e}")
+    st.stop()
 
 if "initialized" not in st.session_state:
     set_defaults(df)
@@ -233,7 +246,7 @@ with st.sidebar:
     st.multiselect("Antigüedad estudiante (años)", options=antig_est_opts, key="antig_est_sel")
     st.multiselect("Antigüedad mentor (años)", options=antig_mentor_opts, key="antig_mentor_sel")
 
-    # ---- Scope base por Grado + Prueba seleccionados ----
+    # ---- Scope base por intersección de filtros (sin competencia aún) ----
     df_scope = df.copy()
 
     gs = st.session_state.get("grados_sel", [])
@@ -286,7 +299,7 @@ with st.sidebar:
 
 
 # -----------------------------------------------------
-# Aplicar filtros generales
+# Aplicar filtros definitivos
 # -----------------------------------------------------
 df_f = df.copy()
 
@@ -321,6 +334,7 @@ if df_f.empty:
 students = make_student_agg(df_f)
 k = kpis(df_f, students)
 
+
 # -----------------------------------------------------
 # KPIs
 # -----------------------------------------------------
@@ -337,23 +351,20 @@ c7.metric("Accuracy estudiante (mediana)", f"{k['Accuracy estudiante (mediana)']
 
 
 # -----------------------------------------------------
-# Tablas de competencias en 3 niveles
+# Tablas de competencias (3 niveles)
 # -----------------------------------------------------
-# 1) Grado × Competencia
 comp_grado = (
     df_f.groupby(["Grado", "grado_num", "Competencia"], as_index=False)["IsCorrect"]
     .agg(n_items="size", accuracy_item="mean")
     .sort_values("grado_num")
 )
 
-# 2) Prueba × Competencia
 comp_prueba = (
     df_f.groupby(["Prueba", "Competencia"], as_index=False)["IsCorrect"]
     .agg(n_items="size", accuracy_item="mean")
     .sort_values(["Prueba", "accuracy_item"])
 )
 
-# 3) Grado × Prueba × Competencia
 comp_grado_prueba = (
     df_f.groupby(["Grado", "grado_num", "Prueba", "Competencia"], as_index=False)["IsCorrect"]
     .agg(n_items="size", accuracy_item="mean")
@@ -364,21 +375,22 @@ comp_grado_prueba = (
 # -----------------------------------------------------
 # Alertas (3 niveles)
 # -----------------------------------------------------
-def build_alerts(df_comp, level_cols):
+def build_alerts(df_comp):
     al = df_comp.copy()
     al["Semaforo"] = al["accuracy_item"].apply(semaforo_accuracy)
     al["Muestra"] = np.where(al["n_items"] < min_items_alert, "Baja", "Adecuada")
     emoji_map = {"Rojo": "🔴", "Amarillo": "🟡", "Verde": "🟢", "Sin dato": "⚪"}
     al["Alerta"] = al["Semaforo"].map(emoji_map)
+    al["Semaforo"] = pd.Categorical(al["Semaforo"], categories=SEMAFORO_ORDER, ordered=True)
     return al
 
-alerts_grado = build_alerts(comp_grado, ["Grado", "Competencia"])
-alerts_prueba = build_alerts(comp_prueba, ["Prueba", "Competencia"])
-alerts_grado_prueba = build_alerts(comp_grado_prueba, ["Grado", "Prueba", "Competencia"])
+alerts_grado = build_alerts(comp_grado)
+alerts_prueba = build_alerts(comp_prueba)
+alerts_grado_prueba = build_alerts(comp_grado_prueba)
 
 
 # -----------------------------------------------------
-# Brechas por género para focos (usamos nivel combinado)
+# Brechas por género (nivel combinado) para focos
 # -----------------------------------------------------
 seg_comp_gen = (
     df_f.groupby(["Grado", "Prueba", "Competencia", "Genero"], as_index=False)["IsCorrect"]
@@ -418,6 +430,41 @@ alerts_gp_gap = alerts_grado_prueba.merge(
     how="left"
 )
 
+if "Semaforo" in alerts_gp_gap.columns:
+    alerts_gp_gap["Semaforo"] = pd.Categorical(alerts_gp_gap["Semaforo"], categories=SEMAFORO_ORDER, ordered=True)
+
+
+# -----------------------------------------------------
+# Antigüedades (agregados)
+# -----------------------------------------------------
+by_ant_est = (
+    students.dropna(subset=["antig_est"])
+    .groupby("antig_est", as_index=False)["accuracy"]
+    .agg(n="count", media="mean", mediana="median", desv="std")
+    .sort_values("antig_est")
+)
+
+by_ant_mentor = (
+    students.dropna(subset=["antig_mentor"])
+    .groupby("antig_mentor", as_index=False)["accuracy"]
+    .agg(n="count", media="mean", mediana="median", desv="std")
+    .sort_values("antig_mentor")
+)
+
+item_ant_est = (
+    df_f.dropna(subset=["Antigüedad Innova"])
+    .groupby("Antigüedad Innova", as_index=False)["IsCorrect"]
+    .agg(n_items="size", accuracy_item="mean")
+    .sort_values("Antigüedad Innova")
+)
+
+item_ant_mentor = (
+    df_f.dropna(subset=["Antigüedad Mentor"])
+    .groupby("Antigüedad Mentor", as_index=False)["IsCorrect"]
+    .agg(n_items="size", accuracy_item="mean")
+    .sort_values("Antigüedad Mentor")
+)
+
 
 # -----------------------------------------------------
 # Exportación Excel
@@ -429,13 +476,14 @@ tables_to_export = {
     "Alertas_Grado": alerts_grado,
     "Alertas_Prueba": alerts_prueba,
     "Alertas_Grado_Prueba": alerts_gp_gap,
+    "Antig_Estudiante": by_ant_est,
+    "Antig_Docente": by_ant_mentor,
     "Resumen_Estudiantes": (
         students.groupby(["grado", "genero"], as_index=False)["accuracy"]
         .agg(n="count", media="mean", mediana="median", desv="std")
         .sort_values("media", ascending=False)
     )
 }
-
 excel_bytes = build_export_excel(tables_to_export)
 
 st.download_button(
@@ -449,14 +497,15 @@ st.download_button(
 # -----------------------------------------------------
 # Tabs
 # -----------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Resumen",
     "Grados",
     "Pruebas",
     "Género",
     "Competencias",
     "Alertas",
-    "Focos de intervención"
+    "Focos de intervención",
+    "Antigüedades"
 ])
 
 
@@ -466,7 +515,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 with tab1:
     st.subheader("Distribución general del desempeño (nivel estudiante)")
     fig_hist = px.histogram(students, x="accuracy", nbins=30, title="Distribución de accuracy por estudiante")
-    st.plotly_chart(fig_hist, use_container_width=True)
+    plot(fig_hist, key="hist_accuracy_est")
 
     st.subheader("Desempeño agregado por Prueba (ítem)")
     prueba_item = (
@@ -478,7 +527,7 @@ with tab1:
 
     fig_pr = px.bar(prueba_item, x="Prueba", y="accuracy_item", title="Accuracy por ítem según Prueba")
     fig_pr.update_layout(xaxis_tickangle=-45)
-    st.plotly_chart(fig_pr, use_container_width=True)
+    plot(fig_pr, key="bar_accuracy_prueba_resumen")
 
 
 # =====================================================
@@ -496,12 +545,12 @@ with tab2:
     st.dataframe(by_grado, use_container_width=True)
 
     fig = px.line(by_grado, x="Grado", y="media", markers=True, title="Accuracy promedio por Grado")
-    plot(fig)
+    plot(fig, key="line_accuracy_grado")
 
     fig_box = px.box(students.sort_values("grado_num"), x="grado", y="accuracy",
                      title="Distribución de accuracy por Grado")
     fig_box.update_layout(xaxis_title="Grado")
-    st.plotly_chart(fig_box, use_container_width=True)
+    plot(fig_box, key="box_accuracy_grado")
 
     if show_inference:
         st.subheader("Inferencia: diferencias entre grados (ANOVA)")
@@ -533,7 +582,7 @@ with tab3:
 
     fig = px.bar(prueba_item, x="Prueba", y="accuracy_item", title="Accuracy por ítem según Prueba")
     fig.update_layout(xaxis_tickangle=-45)
-    plot(fig)
+    plot(fig, key="bar_accuracy_prueba_tab")
 
 
 # =====================================================
@@ -550,7 +599,7 @@ with tab4:
     st.dataframe(by_gen, use_container_width=True)
 
     fig_gen = px.bar(by_gen, x="genero", y="media", title="Accuracy promedio por género")
-    st.plotly_chart(fig_gen, use_container_width=True)
+    plot(fig_gen, key="bar_accuracy_genero")
 
     st.subheader("Género dentro de grado")
     by_grado_gen = (
@@ -561,7 +610,7 @@ with tab4:
     fig = px.bar(by_grado_gen, x="grado", y="media", color="genero", barmode="group",
                  title="Accuracy por Grado y Género (nivel estudiante)")
     fig.update_layout(xaxis_title="Grado")
-    plot(fig)
+    plot(fig, key="bar_grado_genero")
 
     st.subheader("Género dentro de prueba (nivel ítem)")
     by_prueba_gen = (
@@ -572,7 +621,7 @@ with tab4:
     fig = px.bar(by_prueba_gen, x="Prueba", y="accuracy_item", color="Genero", barmode="group",
                  title="Accuracy por ítem: Prueba y Género")
     fig.update_layout(xaxis_tickangle=-45)
-    plot(fig)
+    plot(fig, key="bar_prueba_genero")
 
     if show_inference:
         st.subheader("Inferencia: diferencia global por género (Welch)")
@@ -599,7 +648,8 @@ with tab5:
     vista = st.radio(
         "Ver competencias por:",
         ["Grado × Competencia", "Prueba × Competencia", "Grado × Prueba × Competencia"],
-        horizontal=True
+        horizontal=True,
+        key="vista_comp"
     )
 
     if vista == "Grado × Competencia":
@@ -611,13 +661,14 @@ with tab5:
             y="accuracy_item",
             color="Competencia",
             barmode="group",
-            title="Accuracy por ítem: Grado × Competencia"
+            title="Accuracy por ítem: Grado × Competencia",
+            category_orders={"Grado": GRADO_ORDER}
         )
-        plot(fig)
+        plot(fig, key="bar_comp_grado")
 
         pivot = comp_grado.pivot(index="Competencia", columns="Grado", values="accuracy_item")
         fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Grado")
-        st.plotly_chart(fig_h, use_container_width=True)
+        plot(fig_h, key="heat_comp_grado")
 
     elif vista == "Prueba × Competencia":
         st.dataframe(comp_prueba, use_container_width=True)
@@ -631,18 +682,17 @@ with tab5:
             title="Accuracy por ítem: Prueba × Competencia"
         )
         fig.update_layout(xaxis_tickangle=-45)
-        plot(fig)
+        plot(fig, key="bar_comp_prueba")
 
         pivot = comp_prueba.pivot(index="Competencia", columns="Prueba", values="accuracy_item")
         fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Prueba")
-        st.plotly_chart(fig_h, use_container_width=True)
+        plot(fig_h, key="heat_comp_prueba")
 
     else:
         st.dataframe(comp_grado_prueba, use_container_width=True)
-
         st.caption(
-            "Vista combinada útil para ver cómo cambia una competencia dentro de una misma prueba "
-            "a través de grados (o viceversa)."
+            "Vista combinada para observar variaciones finas por grado dentro de una prueba "
+            "y competencia específica."
         )
 
 
@@ -658,7 +708,8 @@ with tab6:
         vista_a = st.radio(
             "Nivel de alerta:",
             ["Grado × Competencia", "Prueba × Competencia", "Grado × Prueba × Competencia"],
-            horizontal=True
+            horizontal=True,
+            key="vista_alert"
         )
 
         if vista_a == "Grado × Competencia":
@@ -671,9 +722,11 @@ with tab6:
                 color="Semaforo",
                 size="n_items",
                 hover_data=["Competencia", "n_items", "Muestra"],
-                title="Mapa de alertas: Grado × Competencia"
+                title="Mapa de alertas: Grado × Competencia",
+                category_orders={"Semaforo": SEMAFORO_ORDER, "Grado": GRADO_ORDER},
+                color_discrete_map=SEMAFORO_COLOR_MAP
             )
-            plot(fig)
+            plot(fig, key="scatter_alert_grado")
 
         elif vista_a == "Prueba × Competencia":
             st.dataframe(alerts_prueba.sort_values(["Semaforo", "accuracy_item"]), use_container_width=True)
@@ -685,16 +738,18 @@ with tab6:
                 color="Semaforo",
                 size="n_items",
                 hover_data=["Competencia", "n_items", "Muestra"],
-                title="Mapa de alertas: Prueba × Competencia"
+                title="Mapa de alertas: Prueba × Competencia",
+                category_orders={"Semaforo": SEMAFORO_ORDER},
+                color_discrete_map=SEMAFORO_COLOR_MAP
             )
             fig.update_layout(xaxis_tickangle=-45)
-            plot(fig)
+            plot(fig, key="scatter_alert_prueba")
 
         else:
             st.dataframe(
                 alerts_gp_gap[
-                    ["Grado", "Prueba", "Competencia", "n_items", "accuracy_item", "Alerta",
-                     "Muestra", "Genero_A", "Genero_B", "gap_genero", "abs_gap_genero"]
+                    ["Grado", "Prueba", "Competencia", "n_items", "accuracy_item",
+                     "Alerta", "Muestra", "Genero_A", "Genero_B", "gap_genero", "abs_gap_genero"]
                 ].sort_values(["Semaforo", "accuracy_item"]),
                 use_container_width=True
             )
@@ -706,10 +761,12 @@ with tab6:
                 color="Semaforo",
                 size="n_items",
                 hover_data=["Grado", "Competencia", "Muestra", "abs_gap_genero"],
-                title="Mapa de alertas combinado: Grado × Prueba × Competencia"
+                title="Mapa de alertas combinado: Grado × Prueba × Competencia",
+                category_orders={"Semaforo": SEMAFORO_ORDER},
+                color_discrete_map=SEMAFORO_COLOR_MAP
             )
             fig.update_layout(xaxis_tickangle=-45)
-            plot(fig)
+            plot(fig, key="scatter_alert_grado_prueba")
 
         st.caption(
             f"Umbrales sugeridos: 🔴 < 0.55, 🟡 0.55–0.65, 🟢 ≥ 0.65. "
@@ -763,7 +820,62 @@ Criterios aplicados sobre **Grado × Prueba × Competencia**:
             color="Prueba",
             title="Top 10 brechas por género en focos rojos (vista combinada)"
         )
-        plot(fig)
+        plot(fig, key="bar_top10_brechas")
+
+
+# =====================================================
+# TAB 8 - Antigüedades
+# =====================================================
+with tab8:
+    st.subheader("Antigüedad del estudiante (Innova)")
+
+    if by_ant_est.empty:
+        st.info("No hay datos suficientes de antigüedad del estudiante con los filtros actuales.")
+    else:
+        st.dataframe(by_ant_est, use_container_width=True)
+
+        fig = px.line(
+            by_ant_est, x="antig_est", y="media", markers=True,
+            title="Accuracy promedio (estudiante) por antigüedad en Innova"
+        )
+        plot(fig, key="line_antig_est_students")
+
+        fig = px.bar(
+            item_ant_est, x="Antigüedad Innova", y="accuracy_item",
+            title="Accuracy por ítem según antigüedad del estudiante"
+        )
+        plot(fig, key="bar_antig_est_items")
+
+    st.subheader("Antigüedad del docente/mentor (sin nombres)")
+
+    if by_ant_mentor.empty:
+        st.info("No hay datos suficientes de antigüedad del docente con los filtros actuales.")
+    else:
+        st.dataframe(by_ant_mentor, use_container_width=True)
+
+        fig = px.line(
+            by_ant_mentor, x="antig_mentor", y="media", markers=True,
+            title="Accuracy promedio (estudiante) por antigüedad del docente"
+        )
+        plot(fig, key="line_antig_mentor_students")
+
+        fig = px.bar(
+            item_ant_mentor, x="Antigüedad Mentor", y="accuracy_item",
+            title="Accuracy por ítem según antigüedad del docente"
+        )
+        plot(fig, key="bar_antig_mentor_items")
+
+    if show_inference:
+        st.subheader("Inferencia rápida (tendencias agregadas)")
+        try:
+            if len(by_ant_est) >= 3:
+                r, p = stats.pearsonr(by_ant_est["antig_est"], by_ant_est["media"])
+                st.info(f"Correlación agregada antigüedad estudiante vs desempeño: r={r:.3f}, p={p:.3e}")
+            if len(by_ant_mentor) >= 3:
+                r, p = stats.pearsonr(by_ant_mentor["antig_mentor"], by_ant_mentor["media"])
+                st.info(f"Correlación agregada antigüedad docente vs desempeño: r={r:.3f}, p={p:.3e}")
+        except Exception as e:
+            st.warning(f"No fue posible calcular correlaciones agregadas: {e}")
 
 
 # -----------------------------------------------------
@@ -804,6 +916,6 @@ if show_models:
             })
 
             st.dataframe(out, use_container_width=True)
+            st.caption("Modelo exploratorio institucional. No implica causalidad.")
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
-
