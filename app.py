@@ -716,8 +716,27 @@ with tab5:
         plot(fig, key="bar_comp_grado")
 
         pivot = comp_grado.pivot(index="Competencia", columns="Grado", values="accuracy_item")
-        fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Grado")
+        
+        # Orden de columnas por jerarquía
+        cols_orden = [g for g in GRADO_ORDER if g in pivot.columns]
+        pivot = pivot.reindex(columns=cols_orden)
+        
+        pivot.index = pivot.index.astype(str)
+        pivot.columns = pivot.columns.astype(str)
+        
+        fig_h = px.imshow(
+            pivot,
+            aspect="auto",
+            labels=dict(x="Grado", y="Competencia", color="Accuracy ítem"),
+            text_auto=".2f"
+        )
+        
+        fig_h.update_xaxes(showticklabels=True, type="category", tickangle=-45)
+        fig_h.update_yaxes(showticklabels=True, type="category")
+        fig_h.update_layout(title="Heatmap: Competencia × Grado", height=320)
+        
         plot(fig_h, key="heat_comp_grado")
+
 
     elif vista == "Prueba × Competencia":
         st.dataframe(comp_prueba, use_container_width=True)
@@ -734,8 +753,23 @@ with tab5:
         plot(fig, key="bar_comp_prueba")
 
         pivot = comp_prueba.pivot(index="Competencia", columns="Prueba", values="accuracy_item")
-        fig_h = px.imshow(pivot, aspect="auto", title="Heatmap: Competencia × Prueba")
+        
+        pivot.index = pivot.index.astype(str)
+        pivot.columns = pivot.columns.astype(str)
+        
+        fig_h = px.imshow(
+            pivot,
+            aspect="auto",
+            labels=dict(x="Prueba", y="Competencia", color="Accuracy ítem"),
+            text_auto=".2f"
+        )
+        
+        fig_h.update_xaxes(showticklabels=True, type="category", tickangle=-45)
+        fig_h.update_yaxes(showticklabels=True, type="category")
+        fig_h.update_layout(title="Heatmap: Competencia × Prueba", height=320)
+        
         plot(fig_h, key="heat_comp_prueba")
+
 
     else:
         st.dataframe(comp_grado_prueba, use_container_width=True)
@@ -992,3 +1026,4 @@ if show_models:
             st.caption("Modelo exploratorio institucional. No implica causalidad.")
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
+
