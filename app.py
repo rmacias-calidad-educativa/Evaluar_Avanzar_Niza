@@ -161,10 +161,7 @@ def load_data(path: str) -> pd.DataFrame:
 
 
 def make_student_agg(df_items: pd.DataFrame) -> pd.DataFrame:
-    """
-    Agregado interno a nivel estudiante.
-    No se muestra OrgDefinedId en UI.
-    """
+    """Agregado interno a nivel estudiante. No se muestra OrgDefinedId en UI."""
     g = df_items.groupby("OrgDefinedId", as_index=False).agg(
         items=("IsCorrect", "size"),
         correct=("IsCorrect", "sum"),
@@ -283,7 +280,6 @@ with st.sidebar:
 
     comps_options = sorted(df_scope["Competencia"].dropna().unique().tolist())
 
-    # Mantener consistencia del estado frente a opciones dinámicas
     if "comp_sel" not in st.session_state:
         st.session_state["comp_sel"] = comps_options
     else:
@@ -388,7 +384,7 @@ comp_grado_prueba = (
 
 
 # -----------------------------------------------------
-# Alertas (3 niveles) - FIX COLORES
+# Alertas (3 niveles)
 # -----------------------------------------------------
 def build_alerts(df_comp, min_items):
     al = df_comp.copy()
@@ -470,7 +466,6 @@ by_ant_mentor = (
 
 ant_pair = students_ant.dropna(subset=["antig_est", "antig_mentor"]).copy()
 
-# Grid conjunto de desempeño
 ant_joint = (
     ant_pair.groupby(["antig_est", "antig_mentor"], as_index=False)["accuracy"]
     .agg(n="count", media="mean", mediana="median")
@@ -480,7 +475,6 @@ ant_joint = (
 ant_joint_pivot_media = ant_joint.pivot(index="antig_est", columns="antig_mentor", values="media")
 ant_joint_pivot_n = ant_joint.pivot(index="antig_est", columns="antig_mentor", values="n")
 
-# Correlación entre antigüedades (relación)
 corr_rows = []
 if len(ant_pair) >= 5:
     try:
@@ -495,7 +489,6 @@ if len(ant_pair) >= 5:
         pass
 ant_corr = pd.DataFrame(corr_rows)
 
-# Modelo con interacción (asociativo) - nivel estudiante
 ant_model_table = pd.DataFrame()
 if STATS_MODELS_OK:
     try:
@@ -512,7 +505,7 @@ if STATS_MODELS_OK:
 
 
 # -----------------------------------------------------
-# Exportación Excel (agregados + antigüedades)
+# Exportación Excel
 # -----------------------------------------------------
 tables_to_export = {
     "Grado_Competencia": comp_grado,
@@ -689,7 +682,7 @@ with tab4:
 
 
 # =====================================================
-# TAB 5 - Competencias
+# TAB 5 - Competencias (SIN HEATMAP)
 # =====================================================
 with tab5:
     st.subheader("Competencias - vistas institucionales")
@@ -701,75 +694,74 @@ with tab5:
         key="vista_comp"
     )
 
+    # --- Vista global simple (siempre útil) ---
+    st.markdown("### Desempeño global por competencia (ítem)")
+
+    comp_global = (
+        df_f.groupby("Competencia", as_index=False)["IsCorrect"]
+        .agg(n_items="size", accuracy_item="mean")
+        .sort_values("accuracy_item")
+    )
+
+    fig_global = px.bar(
+        comp_global,
+        x="accuracy_item",
+        y="Competencia",
+        orientation="h",
+        title="Accuracy global por competencia"
+    )
+    fig_global.update_xaxes(range=[0, 1], title="Accuracy ítem (0–1)")
+    fig_global.update_yaxes(title="Competencia")
+    fig_global.update_layout(height=380)
+
+    plot(fig_global, key="bar_comp_global_h")
+
+    st.divider()
+
     if vista == "Grado × Competencia":
         st.dataframe(comp_grado, use_container_width=True)
 
-        fig = px.bar(
-            comp_grado,
-            x="Grado",
-            y="accuracy_item",
-            color="Competencia",
+        perfil_grado = comp_grado.copy()
+        perfil_grado["Grado"] = pd.Categorical(perfil_grado["Grado"], categories=GRADO_ORDER, ordered=True)
+        perfil_grado = perfil_grado.sort_values(["Competencia", "grado_num"])
+
+        fig_hbar = px.bar(
+            perfil_grado,
+            x="accuracy_item",
+            y="Competencia",
+            color="Grado",
+            orientation="h",
             barmode="group",
-            title="Accuracy por ítem: Grado × Competencia",
-            category_orders={"Grado": GRADO_ORDER}
+            title="Perfil de competencias por grado (accuracy ítem)"
         )
-        plot(fig, key="bar_comp_grado")
 
-        pivot = comp_grado.pivot(index="Competencia", columns="Grado", values="accuracy_item")
-        
-        # Orden de columnas por jerarquía
-        cols_orden = [g for g in GRADO_ORDER if g in pivot.columns]
-        pivot = pivot.reindex(columns=cols_orden)
-        
-        pivot.index = pivot.index.astype(str)
-        pivot.columns = pivot.columns.astype(str)
-        
-        fig_h = px.imshow(
-            pivot,
-            aspect="auto",
-            labels=dict(x="Grado", y="Competencia", color="Accuracy ítem"),
-            text_auto=".2f"
-        )
-        
-        fig_h.update_xaxes(showticklabels=True, type="category", tickangle=-45)
-        fig_h.update_yaxes(showticklabels=True, type="category")
-        fig_h.update_layout(title="Heatmap: Competencia × Grado", height=320)
-        
-        plot(fig_h, key="heat_comp_grado")
+        fig_hbar.update_xaxes(range=[0, 1], title="Accuracy ítem (0–1)")
+        fig_hbar.update_yaxes(title="Competencia")
+        fig_hbar.update_layout(height=420)
 
+        plot(fig_hbar, key="bar_comp_grado_h")
 
     elif vista == "Prueba × Competencia":
         st.dataframe(comp_prueba, use_container_width=True)
 
-        fig = px.bar(
-            comp_prueba,
-            x="Prueba",
-            y="accuracy_item",
-            color="Competencia",
+        perfil_prueba = comp_prueba.copy()
+        perfil_prueba = perfil_prueba.sort_values(["Competencia", "accuracy_item"])
+
+        fig_hbar = px.bar(
+            perfil_prueba,
+            x="accuracy_item",
+            y="Competencia",
+            color="Prueba",
+            orientation="h",
             barmode="group",
-            title="Accuracy por ítem: Prueba × Competencia"
+            title="Perfil de competencias por prueba (accuracy ítem)"
         )
-        fig.update_layout(xaxis_tickangle=-45)
-        plot(fig, key="bar_comp_prueba")
 
-        pivot = comp_prueba.pivot(index="Competencia", columns="Prueba", values="accuracy_item")
-        
-        pivot.index = pivot.index.astype(str)
-        pivot.columns = pivot.columns.astype(str)
-        
-        fig_h = px.imshow(
-            pivot,
-            aspect="auto",
-            labels=dict(x="Prueba", y="Competencia", color="Accuracy ítem"),
-            text_auto=".2f"
-        )
-        
-        fig_h.update_xaxes(showticklabels=True, type="category", tickangle=-45)
-        fig_h.update_yaxes(showticklabels=True, type="category")
-        fig_h.update_layout(title="Heatmap: Competencia × Prueba", height=320)
-        
-        plot(fig_h, key="heat_comp_prueba")
+        fig_hbar.update_xaxes(range=[0, 1], title="Accuracy ítem (0–1)")
+        fig_hbar.update_yaxes(title="Competencia")
+        fig_hbar.update_layout(height=420)
 
+        plot(fig_hbar, key="bar_comp_prueba_h")
 
     else:
         st.dataframe(comp_grado_prueba, use_container_width=True)
@@ -777,7 +769,7 @@ with tab5:
 
 
 # =====================================================
-# TAB 6 - Alertas
+# TAB 6 - Alertas (fix KeyError)
 # =====================================================
 with tab6:
     st.subheader("Alertas institucionales")
@@ -826,13 +818,15 @@ with tab6:
             plot(fig, key="scatter_alert_prueba")
 
         else:
-            st.dataframe(
-                alerts_gp_gap[
-                    ["Grado", "Prueba", "Competencia", "n_items", "accuracy_item",
-                     "Alerta", "Muestra", "Genero_A", "Genero_B", "gap_genero", "abs_gap_genero"]
-                ].sort_values(["Semaforo", "accuracy_item"]),
-                use_container_width=True
+            # ✅ FIX: ordenar antes de seleccionar columnas
+            tabla_gp = (
+                alerts_gp_gap
+                .sort_values(["Semaforo", "accuracy_item"])
+                [["Grado", "Prueba", "Competencia", "Semaforo", "n_items", "accuracy_item",
+                  "Alerta", "Muestra", "Genero_A", "Genero_B", "gap_genero", "abs_gap_genero"]]
             )
+
+            st.dataframe(tabla_gp, use_container_width=True)
 
             fig = px.scatter(
                 alerts_gp_gap,
@@ -947,7 +941,8 @@ with tab8:
     else:
         st.dataframe(ant_joint, use_container_width=True)
 
-        # Heatmap de medias
+        # Mantengo estos heatmaps porque son del módulo de antigüedades.
+        # Si deseas, los cambiamos también por barras o superficies.
         try:
             fig = px.imshow(
                 ant_joint_pivot_media,
@@ -958,7 +953,6 @@ with tab8:
         except Exception:
             st.caption("No fue posible renderizar el heatmap de medias con los filtros actuales.")
 
-        # Heatmap de tamaño muestral
         try:
             fig = px.imshow(
                 ant_joint_pivot_n,
@@ -1026,4 +1020,3 @@ if show_models:
             st.caption("Modelo exploratorio institucional. No implica causalidad.")
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
-
