@@ -737,7 +737,7 @@ with tab5:
 
         fig_hbar.update_xaxes(range=[0, 1], title="Accuracy ítem (0–1)")
         fig_hbar.update_yaxes(title="Competencia")
-        fig_hbar.update_layout(height=420)
+        fig_hbar.update_layout(height=700)
 
         plot(fig_hbar, key="bar_comp_grado_h")
 
@@ -1020,3 +1020,4 @@ if show_models:
             st.caption("Modelo exploratorio institucional. No implica causalidad.")
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
+
