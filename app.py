@@ -119,6 +119,56 @@ def cohen_d(x, y):
     return (x.mean() - y.mean()) / pooled
 
 
+def student_group_agg(df_items: pd.DataFrame, group_cols: list) -> pd.DataFrame:
+    """
+    Agrega desempeño por estudiante dentro de group_cols.
+    No expone OrgDefinedId; usa Estudiante (EST####).
+    """
+    cols = ["Estudiante", "Genero", "Grado", "grado_num"] + group_cols
+    out = (
+        df_items.groupby(cols, as_index=False)["IsCorrect"]
+        .agg(n_items="size", correct="sum", accuracy="mean")
+    )
+    return out
+
+
+def top_bottom_by_group(df_stu: pd.DataFrame, group_cols: list, n_rank: int, min_items_student: int) -> pd.DataFrame:
+    """
+    Devuelve tabla con Top/Bottom N por cada grupo en group_cols (por ejemplo Competencia o Prueba).
+    """
+    base = df_stu.copy()
+    base = base[base["n_items"] >= min_items_student].copy()
+
+    if base.empty:
+        return pd.DataFrame(columns=list(base.columns) + ["Tipo", "Rank"])
+
+    # TOP
+    top = (
+        base.sort_values(group_cols + ["accuracy", "n_items"],
+                         ascending=[True]*len(group_cols) + [False, False])
+        .groupby(group_cols, group_keys=False)
+        .head(n_rank)
+        .copy()
+    )
+    top["Tipo"] = "Mejores"
+    top["Rank"] = top.groupby(group_cols).cumcount() + 1
+
+    # BOTTOM
+    bottom = (
+        base.sort_values(group_cols + ["accuracy", "n_items"],
+                         ascending=[True]*len(group_cols) + [True, False])
+        .groupby(group_cols, group_keys=False)
+        .head(n_rank)
+        .copy()
+    )
+    bottom["Tipo"] = "Peores"
+    bottom["Rank"] = bottom.groupby(group_cols).cumcount() + 1
+
+    out = pd.concat([top, bottom], ignore_index=True)
+    out = out.sort_values(group_cols + ["Tipo", "Rank"])
+    return out
+
+
 # -----------------------------------------------------
 # Carga de datos
 # -----------------------------------------------------
@@ -156,6 +206,11 @@ def load_data(path: str) -> pd.DataFrame:
     # Exclusión explícita por instrucción
     if "EdadEst" in df.columns:
         df = df.drop(columns=["EdadEst"])
+
+    # Código anónimo estable por estudiante (para UI y reportes)
+    ids_sorted = sorted(df["OrgDefinedId"].astype(str).dropna().unique().tolist())
+    id_map = {sid: f"EST{idx:04d}" for idx, sid in enumerate(ids_sorted, start=1)}
+    df["Estudiante"] = df["OrgDefinedId"].astype(str).map(id_map)
 
     return df
 
@@ -302,6 +357,11 @@ with st.sidebar:
     st.markdown("**Focos de intervención**")
     gap_threshold = st.slider("Umbral brecha absoluta por género", 0.00, 0.20, 0.05, 0.01)
     min_items_alert = st.number_input("Mínimo ítems para evidencia adecuada", 10, 500, 50, 10)
+
+    st.divider()
+    st.subheader("Ranking estudiantes")
+    rank_n = st.slider("Top/Bottom por grupo", 3, 30, 10, 1)
+    min_items_student = st.number_input("Mínimo ítems por estudiante y grupo", 3, 200, 10, 1)
 
     st.divider()
     if st.button("Restablecer filtros"):
@@ -505,6 +565,43 @@ if STATS_MODELS_OK:
 
 
 # -----------------------------------------------------
+# Rankings estudiante (mejores / peores) por Competencia / Prueba
+# -----------------------------------------------------
+stu_comp = student_group_agg(df_f, group_cols=["Competencia"])
+stu_prueba = student_group_agg(df_f, group_cols=["Prueba"])
+stu_prucomp = student_group_agg(df_f, group_cols=["Prueba", "Competencia"])
+
+tb_comp = top_bottom_by_group(stu_comp, group_cols=["Competencia"], n_rank=rank_n, min_items_student=min_items_student)
+tb_prueba = top_bottom_by_group(stu_prueba, group_cols=["Prueba"], n_rank=rank_n, min_items_student=min_items_student)
+tb_prucomp = top_bottom_by_group(stu_prucomp, group_cols=["Prueba", "Competencia"], n_rank=rank_n, min_items_student=min_items_student)
+
+# Consolidado para exportación
+frames = []
+if not tb_comp.empty:
+    x = tb_comp.copy()
+    x["Vista"] = "Competencia"
+    frames.append(x)
+if not tb_prueba.empty:
+    x = tb_prueba.copy()
+    x["Vista"] = "Prueba"
+    frames.append(x)
+if not tb_prucomp.empty:
+    x = tb_prucomp.copy()
+    x["Vista"] = "Prueba×Competencia"
+    frames.append(x)
+
+if frames:
+    topbottom_estudiantes = pd.concat(frames, ignore_index=True)
+else:
+    topbottom_estudiantes = pd.DataFrame(columns=[
+        "Estudiante", "Genero", "Grado", "grado_num",
+        "Competencia", "Prueba",
+        "n_items", "correct", "accuracy",
+        "Tipo", "Rank", "Vista"
+    ])
+
+
+# -----------------------------------------------------
 # Exportación Excel
 # -----------------------------------------------------
 tables_to_export = {
@@ -523,7 +620,8 @@ tables_to_export = {
         students.groupby(["grado", "genero"], as_index=False)["accuracy"]
         .agg(n="count", media="mean", mediana="median", desv="std")
         .sort_values("media", ascending=False)
-    )
+    ),
+    "TopBottom_Estudiantes": topbottom_estudiantes
 }
 
 excel_bytes = build_export_excel(tables_to_export)
@@ -539,7 +637,7 @@ st.download_button(
 # -----------------------------------------------------
 # Tabs
 # -----------------------------------------------------
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Resumen",
     "Grados",
     "Pruebas",
@@ -547,7 +645,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Competencias",
     "Alertas",
     "Focos de intervención",
-    "Antigüedades"
+    "Antigüedades",
+    "Estudiantes"
 ])
 
 
@@ -694,7 +793,6 @@ with tab5:
         key="vista_comp"
     )
 
-    # --- Vista global simple (siempre útil) ---
     st.markdown("### Desempeño global por competencia (ítem)")
 
     comp_global = (
@@ -769,7 +867,7 @@ with tab5:
 
 
 # =====================================================
-# TAB 6 - Alertas (fix KeyError)
+# TAB 6 - Alertas
 # =====================================================
 with tab6:
     st.subheader("Alertas institucionales")
@@ -818,7 +916,6 @@ with tab6:
             plot(fig, key="scatter_alert_prueba")
 
         else:
-            # ✅ FIX: ordenar antes de seleccionar columnas
             tabla_gp = (
                 alerts_gp_gap
                 .sort_values(["Semaforo", "accuracy_item"])
@@ -941,8 +1038,6 @@ with tab8:
     else:
         st.dataframe(ant_joint, use_container_width=True)
 
-        # Mantengo estos heatmaps porque son del módulo de antigüedades.
-        # Si deseas, los cambiamos también por barras o superficies.
         try:
             fig = px.imshow(
                 ant_joint_pivot_media,
@@ -977,6 +1072,89 @@ with tab8:
                 "Modelo exploratorio institucional. Interpretación asociativa, no causal. "
                 "Incluye interacción antig_est × antig_mentor y controles por grado y género."
             )
+
+
+# =====================================================
+# TAB 9 - Estudiantes (Top/Bottom por Competencia/Prueba)
+# =====================================================
+with tab9:
+    st.subheader("Mejores y peores desempeños (nivel estudiante)")
+    st.caption(
+        "Ranking sobre los ítems filtrados. Se muestra un código anónimo (EST####). "
+        f"Regla: mínimo {min_items_student} ítems por estudiante dentro del grupo."
+    )
+
+    vista_rank = st.radio(
+        "Ranking por:",
+        ["Competencia", "Prueba", "Prueba×Competencia"],
+        horizontal=True,
+        key="vista_rank_est"
+    )
+
+    if vista_rank == "Competencia":
+        tb = tb_comp
+        group_cols = ["Competencia"]
+    elif vista_rank == "Prueba":
+        tb = tb_prueba
+        group_cols = ["Prueba"]
+    else:
+        tb = tb_prucomp
+        group_cols = ["Prueba", "Competencia"]
+
+    if tb.empty:
+        st.info("No hay suficiente evidencia con los filtros actuales (o el mínimo de ítems es muy alto).")
+    else:
+        # Selectores del grupo
+        if group_cols == ["Competencia"]:
+            comp_opts = tb["Competencia"].dropna().unique().tolist()
+            sel_comp = st.selectbox("Competencia", options=sorted(comp_opts), key="sel_comp_rank")
+            sub = tb[tb["Competencia"] == sel_comp].copy()
+            titulo = f"Competencia: {sel_comp}"
+        elif group_cols == ["Prueba"]:
+            pr_opts = tb["Prueba"].dropna().unique().tolist()
+            sel_pr = st.selectbox("Prueba", options=sorted(pr_opts), key="sel_pr_rank")
+            sub = tb[tb["Prueba"] == sel_pr].copy()
+            titulo = f"Prueba: {sel_pr}"
+        else:
+            pr_opts = tb["Prueba"].dropna().unique().tolist()
+            sel_pr = st.selectbox("Prueba", options=sorted(pr_opts), key="sel_pr_rank2")
+            sub2 = tb[tb["Prueba"] == sel_pr].copy()
+
+            comp_opts = sub2["Competencia"].dropna().unique().tolist()
+            sel_comp = st.selectbox("Competencia", options=sorted(comp_opts), key="sel_comp_rank2")
+            sub = sub2[sub2["Competencia"] == sel_comp].copy()
+            titulo = f"Prueba: {sel_pr} | Competencia: {sel_comp}"
+
+        st.markdown(f"### {titulo}")
+
+        cA, cB = st.columns(2)
+
+        top = sub[sub["Tipo"] == "Mejores"].sort_values("Rank")
+        bottom = sub[sub["Tipo"] == "Peores"].sort_values("Rank")
+
+        cols_show = ["Rank", "Estudiante", "Genero", "Grado", "n_items", "accuracy", "correct"]
+
+        with cA:
+            st.markdown("### 🏆 Mejores")
+            st.dataframe(top[cols_show], use_container_width=True)
+            if not top.empty:
+                fig = px.bar(
+                    top, x="accuracy", y="Estudiante",
+                    orientation="h", title="Top estudiantes (accuracy)"
+                )
+                fig.update_xaxes(range=[0, 1])
+                plot(fig, key="bar_top_est")
+
+        with cB:
+            st.markdown("### 🧱 Peores")
+            st.dataframe(bottom[cols_show], use_container_width=True)
+            if not bottom.empty:
+                fig = px.bar(
+                    bottom, x="accuracy", y="Estudiante",
+                    orientation="h", title="Bottom estudiantes (accuracy)"
+                )
+                fig.update_xaxes(range=[0, 1])
+                plot(fig, key="bar_bottom_est")
 
 
 # -----------------------------------------------------
@@ -1020,4 +1198,3 @@ if show_models:
             st.caption("Modelo exploratorio institucional. No implica causalidad.")
         except Exception as e:
             st.warning(f"No fue posible estimar el modelo con los filtros actuales: {e}")
-
